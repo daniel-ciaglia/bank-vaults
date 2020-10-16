@@ -20,7 +20,6 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -2001,9 +2000,7 @@ func withNamespaceEnv(v *vaultv1alpha1.Vault, envs []corev1.EnvVar) []corev1.Env
 }
 
 func withContainerSecurityContext(v *vaultv1alpha1.Vault) *corev1.SecurityContext {
-	var config map[string]interface{}
-	_ = json.Unmarshal(v.Spec.Config.Raw, &config)
-
+	config := v.Spec.GetVaultConfig()
 	if cast.ToBool(config["disable_mlock"]) {
 		return &corev1.SecurityContext{}
 	}
