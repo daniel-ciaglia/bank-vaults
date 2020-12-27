@@ -17,6 +17,8 @@ package vault
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -33,6 +35,10 @@ import (
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/iam/v1"
 	"k8s.io/client-go/rest"
+
+	"github.com/aws/aws-sdk-go/aws/endpoints"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/sts"
 )
 
 const (
@@ -133,6 +139,10 @@ const (
 	// AWSEC2AuthMethod is used for the Vault AWS EC2 auth method
 	// as described here: https://www.vaultproject.io/docs/auth/aws#ec2-auth-method
 	AWSEC2AuthMethod ClientAuthMethod = "aws-ec2"
+
+	// AWSIAMAuthMethod is used for the Vault AWS IAM auth method
+	// as described here: https://www.vaultproject.io/docs/auth/aws#iam-auth-method
+	AWSIAMAuthMethod ClientAuthMethod = "aws-iam"
 
 	// GCPGCEAuthMethod is used for the Vault GCP GCE auth method
 	// as described here: https://www.vaultproject.io/docs/auth/gcp#gce-login
@@ -240,6 +250,22 @@ func NewClientFromConfig(config *vaultapi.Config, opts ...ClientOption) (*Client
 
 	return client, nil
 }
+
+// helper for AWSIAMAuthMethod
+// from https://github.com/hashicorp/vault/blob/master/builtin/credential/aws/cli.go
+// STS is a really weird service that used to only have global endpoints but now has regional endpoints as well.
+// For backwards compatibility, even if you request a region other than us-east-1, it'll still sign for us-east-1.
+// See, e.g., https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_temp_enable-regions.html#id_credentials_temp_enable-regions_writing_code
+// So we have to shim in this EndpointResolver to force it to sign for the right region
+func stsSigningResolver(service, region string, optFns ...func(*endpoints.Options)) (endpoints.ResolvedEndpoint, error) {
+	defaultEndpoint, err := endpoints.DefaultResolver().EndpointFor(service, region, optFns...)
+	if err != nil {
+		return defaultEndpoint, err
+	}
+	defaultEndpoint.SigningRegion = region
+	return defaultEndpoint, nil
+}
+// --- end -----------------------------
 
 // NewClientFromRawClient creates a new Vault client from custom raw client.
 func NewClientFromRawClient(rawClient *vaultapi.Client, opts ...ClientOption) (*Client, error) {
@@ -368,6 +394,46 @@ func NewClientFromRawClient(rawClient *vaultapi.Client, opts ...ClientOption) (*
 						"pkcs7": pkcs7,
 						"nonce": nonce,
 						"role":  o.role,
+					}, nil
+				}
+
+			case AWSIAMAuthMethod:
+				// https://www.vaultproject.io/docs/auth/aws#iam-auth-method
+				// https://www.vaultproject.io/docs/auth/aws#ec2-auth-method
+				// https://gruntwork.io/repos/v0.13.4/terraform-aws-vault/examples/vault-iam-auth
+				// code taken from https://github.com/hashicorp/vault/blob/master/builtin/credential/aws/cli.go
+
+				loginDataFunc = func() (map[string]interface{}, error) {
+					// no need for detailed setup
+					// https://docs.aws.amazon.com/sdk-for-go/api/aws/session/
+					stsSession, err := session.NewSession()
+					if err != nil {
+						return nil, err
+					}
+
+					var params *sts.GetCallerIdentityInput
+					svc := sts.New(stsSession)
+					stsRequest, _ := svc.GetCallerIdentityRequest(params)
+
+					stsRequest.HTTPRequest.Header.Add("X-Vault-AWS-IAM-Server-ID", strings.TrimPrefix(os.Getenv("VAULT_ADDR"), "https://"))
+					stsRequest.Sign()
+
+					// Now extract out the relevant parts of the request
+					headersJSON, err := json.Marshal(stsRequest.HTTPRequest.Header)
+					if err != nil {
+						return nil, err
+					}
+					requestBody, err := ioutil.ReadAll(stsRequest.HTTPRequest.Body)
+					if err != nil {
+						return nil, err
+					}
+
+					return map[string]interface{}{
+						"iam_http_request_method": stsRequest.HTTPRequest.Method,
+						"iam_request_url": base64.StdEncoding.EncodeToString([]byte(stsRequest.HTTPRequest.URL.String())),
+						"iam_request_headers": base64.StdEncoding.EncodeToString(headersJSON),
+						"iam_request_body": base64.StdEncoding.EncodeToString(requestBody),
+						"role": o.role,
 					}, nil
 				}
 
