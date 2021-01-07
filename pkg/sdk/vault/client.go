@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -415,7 +416,10 @@ func NewClientFromRawClient(rawClient *vaultapi.Client, opts ...ClientOption) (*
 					svc := sts.New(stsSession)
 					stsRequest, _ := svc.GetCallerIdentityRequest(params)
 
-					stsRequest.HTTPRequest.Header.Add("X-Vault-AWS-IAM-Server-ID", strings.TrimPrefix(os.Getenv("VAULT_ADDR"), "https://"))
+					vaultURL, err := url.Parse(os.Getenv("VAULT_ADDR"))
+					if err == nil {
+						stsRequest.HTTPRequest.Header.Add("X-Vault-AWS-IAM-Server-ID", vaultURL.Hostname())
+					}
 					stsRequest.Sign()
 
 					// Now extract out the relevant parts of the request
